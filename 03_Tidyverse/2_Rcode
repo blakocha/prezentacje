@@ -1,0 +1,331 @@
+library(rvest)
+library(stringr)
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(lattice)
+library(ggplot2)
+
+options(scipen=4)
+
+#**** Prawdopodobienstwa ****
+
+p3<-choose(6,3)*choose(43,3)/choose(49,6)
+p4<-choose(6,4)*choose(43,2)/choose(49,6)
+p5<-choose(6,5)*choose(43,1)/choose(49,6)
+p6<-choose(6,6)*choose(43,0)/choose(49,6)
+p0<-1-p3-p4-p5-p6
+
+
+p3*10+p4*100+p5*3500+p6*1000000 #lotto_plus oczekiwana wygrana
+p3*10+p4*100+p5*3500+p6*1000000-1 #lotto_plus oczekiwana wygrana netto
+
+p3*10+p4*100+p5*3500*.9+p6*.9 #lotto_plus oczekiwana wygrana z uwzgl. podatku
+p3*10+p4*100+p5*3500*.9+p6*.9-1 #lotto_plus oczekiwana wygrana netto z uwzgl. podatku
+
+
+#**** Wczytywanie wygranych z www.multipasko.pl ****
+
+
+CzytajWygrane <- function(lotto_rok){
+  html_to_read<-paste("https://www.multipasko.pl/wygrane-lotto/duzy-lotek",lotto_rok,"", sep="/")
+  read1<-read_html(html_to_read)
+  read2<-read1 %>% html_node("table.wygrane-year") %>% html_table(header=TRUE)
+  read2<-read2[!(read2$Losowanie=="Suma"),]
+  read3<-read2 %>% separate("6/6", c("liczba_6", "wygrana_6"), " x ") %>% 
+    separate("5/6", c("liczba_5", "wygrana_5"), " x ") %>%
+    separate("4/6", c("liczba_4", "wygrana_4"), " x ") %>%
+    separate("3/6", c("liczba_3", "wygrana_3"), " x ") %>%
+    separate("Losowanie", c("Nr", "Data"), -11)
+  return(read3)}
+
+#wczytuję do 2003-2016
+lotto_wygrane_do2016<-CzytajWygrane(2016)
+for (lotto_rok in 2015:2003){  lotto_wygrane_do2016<-rbind(lotto_wygrane_do2016,CzytajWygrane(lotto_rok))}
+
+#wczytuję 2017 - przydatne, jeżeli będę chciał aktualizować
+lotto_wygrane_all<-rbind(CzytajWygrane(2017), lotto_wygrane_do2016)
+
+#**** Wczytywanie wyników z www.multipasko.pl ****
+
+maxNr<-as.numeric(max(lotto_wygrane_all$Nr))
+
+CzytajWyniki <- function(lotto_Nr){
+  html_to_read<-paste("https://www.multipasko.pl/wyniki-lotto/duzy-lotek/sortowane/",lotto_Nr,"/",sep='')
+  read1<-read_html(html_to_read)
+  read2<-read1 %>% html_node("table.wynikiLosowan.bigballs") %>% html_table(header=FALSE)
+  read3<-read2 %>% 
+    mutate(Data=gsub("[^0-9\\.]", "", X2)) %>% 
+    separate("X3", cbind(paste("L_",c(1:6),sep=''),paste("L2_",c(1:6),sep='')), " ") %>% 
+    select(-one_of(c("X4","X5","X6"))) %>%
+    rename("Nr"="X1") %>%
+    select(c(Nr,Data,everything()))
+  return(read3)
+}
+
+lotto_wyniki_do5910<-CzytajWyniki(5910)
+for (lotto_Nr in seq(5910-25,1,-25)){lotto_wyniki_do5910<-rbind(lotto_wyniki_do5910,CzytajWyniki(lotto_Nr))}
+
+lotto_wyniki_reszta<-CzytajWyniki(maxNr)
+for (lotto_Nr in seq(maxNr-25,5910,-25)){
+  lotto_wyniki_reszta<-rbind(lotto_wyniki_reszta,CzytajWyniki(lotto_Nr))
+}
+
+lotto_wyniki_all<-rbind(lotto_wyniki_reszta[lotto_wyniki_reszta$Nr>5910,], lotto_wyniki_do5910)
+
+#**** Przygotowanie i czyszczenie danych ****
+
+lotto_dane<-merge(lotto_wygrane_all, lotto_wyniki_all, by="Nr")
+
+names(lotto_dane)[names(lotto_dane) == 'Zakładów'] <- 'Zakladow'
+names(lotto_dane)[names(lotto_dane) == 'Data.x'] <- 'data_los'
+
+
+#** czyszczenie zmiennych numerycznych 
+
+WyczyscLiczby<-function(liczba){as.numeric(sub(",",".",gsub(" ","",sub(" zł", "", liczba))))}
+kolumny<-c("Nr", "liczba_6", "wygrana_6", "liczba_5", "wygrana_5", "liczba_4", "wygrana_4", "liczba_3",
+           "wygrana_3", "Zakladow", "L_1", "L_2", "L_3", "L_4", "L_5", "L_6", "L2_1", "L2_2", "L2_3",
+           "L2_4", "L2_5", "L2_6")
+numery_kolumn<-which(colnames(lotto_dane) %in% kolumny)
+for (j in numery_kolumn) {lotto_dane[,j]<-WyczyscLiczby(lotto_dane[,j])}
+
+#** czyszczenie dat
+
+lotto_dane$data_los<-as.Date(lotto_dane$data_los,"%d-%m-%Y")
+lotto_dane$dzientyg<-factor(weekdays(as.Date(lotto_dane$data_los,"%d-%m-%Y")))
+lotto_dane$sobota<-as.numeric(lotto_dane$dzientyg=="sobota")
+lotto_dane$czwartek<-as.numeric(lotto_dane$dzientyg=="czwartek")
+
+
+#** Skumulowane zakłady bez 6
+
+lotto_dane$ZakladowBez6<-head(c(0,ave(lotto_dane$Zakladow*(lotto_dane$liczba_6==0), 
+                                      cumsum(lotto_dane$liczba_6>0), FUN=cumsum)),-1)
+
+#** lotto_dane obcięte
+
+min(lotto_dane[lotto_dane$wygrana_3==24,]$data_los)
+lotto_dane_24<-lotto_dane[lotto_dane$data_los>='2011-09-06',]
+
+
+#**** histogramy
+attach(lotto_dane_24)
+histogram(wygrana_6, breaks=30)
+histogram(wygrana_5, breaks=30)
+histogram(wygrana_4, breaks=30)
+histogram(wygrana_3, breaks=30)
+summary(wygrana_3)
+summary(wygrana_4)
+summary(wygrana_5)
+summary(wygrana_6)
+
+#**** wartosc oczekiwana
+p6*mean(wygrana_6)+p5*mean(wygrana_5)+p4*mean(wygrana_4)+p3*mean(wygrana_3)
+
+#**** wartosc oczekiwana - podatek!
+p6*mean(wygrana_6)*.9+p5*mean(wygrana_5)*.9+p4*mean(wygrana_4)+p3*mean(wygrana_3)
+
+
+histogram(Zakladow, breaks=30)
+histogram(ZakladowBez6, breaks=30)
+
+summary(Zakladow)
+summary(ZakladowBez6)
+
+zakl<-mean(Zakladow)
+bez6zakl<-mean(ZakladowBez6)
+
+kwot6<-(zakl+bez6zakl)*2.4*0.51*0.44
+kwot5<-zakl*2.4*0.51*0.08
+kwot3<-zakl*p3*24
+kwot4<-zakl*2.4*0.51-zakl*2.4*.51*.44-kwot5-kwot3
+
+liczba3<-p3*zakl
+liczba4<-p4*zakl
+liczba5<-p5*zakl
+
+liczba6<-dpois(0:40,p6*zakl)
+wygran6<-kwot6/1:41
+
+p6*(sum(liczba6*wygran6))+p5*kwot5/(liczba5+1)+p4*kwot4/(liczba4+1)+p3*24
+
+#wartość oczekiwana wypłaty na podstawie kwoty na wygrane
+2.4*.51
+sum(liczba_6*wygrana_6+liczba_5*wygrana_5+liczba_4*wygrana_4+liczba_3*wygrana_3)/sum(Zakladow)
+sum(liczba_6*wygrana_6)/sum(Zakladow)
+
+detach(lotto_dane_24)
+
+#**** Szacowanie częstości
+ObliczCzestosc<-function(y){
+  wektor_badany<-c(y)
+  zliczwystapienia<-apply(lotto_dane, 1, function(x) as.numeric(length(intersect(as.numeric(
+    c(x[14], x[15], x[16], x[17], x[18], x[19])),wektor_badany))))
+  frequency3<-{sum(lotto_dane[zliczwystapienia>=1,]$liczba_3)/(p3*sum(lotto_dane[zliczwystapienia>=1,]$Zakladow))}
+  frequency4<-{sum(lotto_dane[zliczwystapienia>=1,]$liczba_4)/(p4*sum(lotto_dane[zliczwystapienia>=1,]$Zakladow))}
+  frequency5<-{sum(lotto_dane[zliczwystapienia>=1,]$liczba_5)/(p5*sum(lotto_dane[zliczwystapienia>=1,]$Zakladow))}
+  frequency6<-{sum(lotto_dane[zliczwystapienia>=1,]$liczba_6)/(p6*sum(lotto_dane[zliczwystapienia>=1,]$Zakladow))}
+  return(c(frequency3, frequency4, frequency5, frequency6))
+}
+
+czestosci<-as.data.frame(t(sapply(1:49, function(x) {ObliczCzestosc(x)})))
+names(czestosci)=c("f3", "f4", "f5", "f6")
+View(czestosci)
+
+o3<-(czestosci$f3*p3-choose(5,3)*choose(43,3)/choose(48,6))/(6/49)/
+  (choose(5,2)*choose(43,3)/choose(48,5)-choose(5,3)*choose(43,3)/choose(48,6))
+o4<-(czestosci$f4*p4-choose(5,4)*choose(43,2)/choose(48,6))/(6/49)/
+  (choose(5,3)*choose(43,2)/choose(48,5)-choose(5,4)*choose(43,2)/choose(48,6))
+o5<-(czestosci$f5*p5-choose(5,5)*choose(43,1)/choose(48,6))/(6/49)/
+  (choose(5,4)*choose(43,1)/choose(48,5)-choose(5,5)*choose(43,1)/choose(48,6))
+
+kulki<-1:49
+oszacowania<-as.data.frame(cbind(kulki,o3,o4,o5, f6=czestosci$f6))
+View(oszacowania)
+
+ggplot(data = oszacowania) + 
+  geom_line(mapping = aes(x = kulki, y = o3), color="blue") +
+  geom_line(mapping = aes(x = kulki, y = o4), color="red") +
+  geom_line(mapping = aes(x = kulki, y = o5), color="green") + 
+  geom_point(mapping = aes(x = kulki, y = f6), color="black") 
+
+cor(oszacowania)
+
+lottoCanada<-c(500.2, 533.29, 619.15, 567.41, 621.23, 602.29, 754.5, 548.94, 577.5, 467.71, 604.85, 587.79, 592.6, 581.2, 548.31, 587.42, 570.37, 526.17, 514.76, 453.98, 547.39, 554.09, 595.46, 613.85, 661.26, 558.24, 644.12, 481.53, 476.16, 426.68, 565.33, 481.92, 544.79, 520.2, 591.74, 575.82, 512.76, 465.54, 412.29, 409.94, 448.3, 450.47, 547.28, 578.48, 487.15, 453.13, 470., 472.17, 486.04)
+lottoCanada<-lottoCanada/mean(lottoCanada)
+
+#http://www.brefeld.homepage.t-online.de/lottoquoten.html
+lottoNiemcy<-c(0.923, 1.014, 1.237, 1.144, 1.129, 1.160, 1.276, 1.011, 1.313, 1.195, 1.272, 1.120, 1.043, 0.857, 0.797, 0.976, 1.151, 1.068, 1.210, 0.911, 0.901, 0.889, 1.033, 1.160, 1.124, 1.109, 1.068, 0.865, 0.848, 0.942, 1.026, 1.170, 1.086, 0.963, 0.807, 0.815, 0.943, 0.984, 0.960, 0.965, 0.988, 0.898, 0.813, 0.824, 0.857, 0.814, 0.915, 0.900, 0.934)
+
+cor(o4, lottoCanada, method="spearman")
+cor(o4, lottoCanada, method="pearson")
+cor(o4, lottoNiemcy, method="spearman")
+cor(o4, lottoNiemcy, method="pearson")
+ggplot(as.data.frame(cbind(lottoCanada,lottoPolska4<-o4)), 
+       aes(lottoCanada, lottoPolska4, label=1:49))+geom_text()
+ggplot(as.data.frame(cbind(lottoNiemcy,lottoPolska4<-o4)), 
+       aes(lottoNiemcy, lottoPolska4, label=1:49))+geom_text()
+
+
+#**** Poszukiwanie kombinacji skutecznie liczbę trafień
+
+wektor_badany<-c(46,48,37,49,47,36,43,40,44,38,20,28,39,1)
+#wektor_badany<-c(1,2,3,4,5,6)
+
+
+zlicz_wyst1<-apply(lotto_dane, 1, function(x) as.numeric(length(
+  intersect(as.numeric(c(x[14], x[15], x[16], x[17], x[18], x[19])),wektor_badany))))
+ile_wybranych1<-5
+
+mnoznik3<-{sum(lotto_dane[zlicz_wyst1>=ile_wybranych1,]$liczba_3)/
+    (p3*sum(lotto_dane[zlicz_wyst1>=ile_wybranych1,]$Zakladow))}
+mnoznik4<-{sum(lotto_dane[zlicz_wyst1>=ile_wybranych1,]$liczba_4)/
+    (p4*sum(lotto_dane[zlicz_wyst1>=ile_wybranych1,]$Zakladow))}
+mnoznik5<-{sum(lotto_dane[zlicz_wyst1>=ile_wybranych1,]$liczba_5)/
+    (p5*sum(lotto_dane[zlicz_wyst1>=ile_wybranych1,]$Zakladow))}
+mnoznik6<-{sum(lotto_dane[zlicz_wyst1>=ile_wybranych1,]$liczba_6)/
+    (p6*sum(lotto_dane[zlicz_wyst1>=ile_wybranych1,]$Zakladow))}
+
+
+#*** wartosc oczekiwana
+p6*(sum(liczba6*wygran6))*.9+p5*kwot5/(liczba5+1)*.9+p4*kwot4/(liczba4+1)+p3*24
+
+#*** Teraz z mnożnikami
+p6*(sum(dpois(0:40,p6*mnoznik6*zakl)*wygran6))*.9+p5*kwot5/(liczba5*mnoznik5+1)*.9+
+  p4*(zakl*2.4*0.51*(1-.44-.08)-zakl*p3*mnoznik3*24)/(liczba4*mnoznik4+1)+p3*24
+
+WygranaOczekiwana<-function(z, zpast, m3, m4, m5, m6){
+  k6<-(z+zpast)*2.4*0.51*0.44
+  k5<-z*2.4*0.51*0.08
+  k3<-z*p3*m3*24
+  k4<-z*2.4*0.51-z*2.4*.51*.44-k5-k3
+  
+  li3<-p3*m3*z
+  li4<-p4*m4*z
+  li5<-p5*m5*z
+  
+  li6<-dpois(0:40,p6*m6*z)
+  w6<-k6/1:41
+  
+  return(p6*(sum(li6*w6))*.9+p5*k5/(li5+1)*.9+p4*k4/(li4+1)+p3*24)
+}
+
+WygranaOczekiwana(mean(lotto_dane_24$Zakladow), mean(lotto_dane_24$ZakladowBez6), 
+                1,1,1,1)
+WygranaOczekiwana(mean(lotto_dane_24$Zakladow), mean(lotto_dane_24$ZakladowBez6), 
+                mnoznik3,mnoznik4,mnoznik5,mnoznik6)
+
+#**** Przewidywanie liczby zakładów
+
+ggplot(data = lotto_dane) + 
+  geom_point(mapping = aes(x = ZakladowBez6, y = Zakladow))
+
+ggplot(data = lotto_dane) + 
+  geom_point(mapping = aes(x = ZakladowBez6, y = Zakladow, color = year(data_los)))
+
+d1<-lotto_dane[year(lotto_dane$data_los)>=2011,]
+
+ggplot(data = d1) + 
+  geom_point(mapping = aes(x = ZakladowBez6, y = Zakladow, color = year(data_los)))
+
+ggplot(data = d1 ) + 
+  geom_point(mapping = aes(x = ZakladowBez6, y = Zakladow, color = dzientyg)) +
+  geom_smooth(mapping = aes(x = ZakladowBez6, y = Zakladow, color = dzientyg)) + 
+  xlim(0, 20000000) + ylim(0, 15000000)
+
+model1<-lm(formula=log(d1$Zakladow)~d1$ZakladowBez6+d1$sobota, d1)
+summary(model1)
+
+ggplot(data=as.data.frame(cbind(fittedv<-
+  exp(model1$fitted.values), 
+  zak<-d1$Zakladow))) +
+  geom_point(mapping = aes(x = zak, y = fittedv))
+
+obl_m1<-function(x, sob) {exp(as.numeric(model1$coefficients[1])+
+                                as.numeric(model1$coefficients[2])*x+
+                                as.numeric(model1$coefficients[3])*sob)}
+
+losowe_sobota=(sapply(0:90, function(x) WygranaOczekiwana(obl_m1(x*10^6, 1), x*10^6, 1,1,1,1)))
+rzadsze_sobota=(sapply(0:90, function(x) WygranaOczekiwana(obl_m1(x*10^6, 1), 
+                              x*10^6, mnoznik3,mnoznik4,mnoznik5,mnoznik6)))
+losowe_niesobota=(sapply(0:90, function(x) WygranaOczekiwana(obl_m1(x*10^6, 0), 
+                              x*10^6, 1,1,1,1)))
+rzadsze_niesobota=(sapply(0:90, function(x) WygranaOczekiwana(obl_m1(x*10^6, 0), 
+                              x*10^6, mnoznik3,mnoznik4,mnoznik5,mnoznik6)))
+w_oczekiwane<-as.data.frame(cbind(losowe_niesobota, rzadsze_niesobota, 
+                              losowe_sobota, rzadsze_sobota))
+
+plakat_s<-(0:90*10^6+obl_m1(0:90*10*6, 1))*2.4*.51*.44/1000000
+plakat_ns<-(0:90*10^6+obl_m1(0:90*10*6, 0))*2.4*.51*.44/1000000
+
+ggplot(data = w_oczekiwane ) + 
+  geom_line(aes(plakat_s, y = losowe_sobota, color="losowe (sobota)")) +
+  geom_line(aes(plakat_s, y = rzadsze_sobota, color="rzadsze (sobota)")) + 
+  geom_line(aes(plakat_ns, y = losowe_niesobota, color="losowe (inne dni)")) +
+  geom_line(aes(plakat_ns, y = rzadsze_niesobota, color="rzadsze (inne dni)")) +
+  xlab("Kwota na plakacie (mln)") + ylab("Wartość oczekiwana")  +
+  scale_color_manual(name="Legenda", values=c("red", "blue", "orange", "green"))
+
+oczekiwane<-apply(cbind(lotto_dane_24$Zakladow, 
+    lotto_dane_24$ZakladowBez6),1,function(x) WygranaOczekiwana(
+      x[1], x[2], mnoznik3,mnoznik4,mnoznik5,mnoznik6))
+
+View(cbind(as.data.frame(oczekiwane), lotto_dane_24))
+
+#*** Kelly 
+
+Kelly<-function(w_prawdop, w_wygranych) {
+  f1<-function(x) {sum(w_prawdop*w_wygranych/(1+w_wygranych*x))}
+  as.numeric(uniroot(f1,c(0,1), tol=.Machine$double.eps)[1])
+}
+
+Kelly(c(.6,.4), c(1,-1))
+
+p<-c(1/13983816, 1/2330636, 1/55492, 1/1032, 1/57)
+p<-c(p, 1-sum(p))
+w<-c(10000000, 1200000, 10000, 250, 10, -1)
+sum(p*w)
+
+Kelly(p,w)
+
